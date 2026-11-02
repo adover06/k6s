@@ -116,6 +116,14 @@ build: manifests generate fmt vet ## Build manager binary.
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go
 
+.PHONY: tui
+tui: ## Run the k6s terminal dashboard against your current kubecontext.
+	go run ./cmd/k6s-tui
+
+.PHONY: build-tui
+build-tui: ## Build the k6s-tui binary into bin/.
+	go build -o bin/k6s-tui ./cmd/k6s-tui
+
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
