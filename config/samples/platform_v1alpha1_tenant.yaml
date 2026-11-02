@@ -1,0 +1,13 @@
+apiVersion: platform.k6s.dev/v1alpha1
+kind: Tenant
+metadata:
+  name: alpha
+spec:
+  admins:
+    - kind: User
+      name: alice
+      apiGroup: rbac.authorization.k8s.io
+  quota:
+    cpu: "2"
+    memory: 4Gi
+    pods: 10
