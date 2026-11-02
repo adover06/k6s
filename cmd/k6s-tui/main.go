@@ -24,7 +24,8 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"sort"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,6 +35,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -45,14 +47,11 @@ import (
 
 const refreshEvery = 3 * time.Second
 
-// ---- palette ----------------------------------------------------------------
-
 var (
 	accent  = lipgloss.Color("39")  // bright blue
 	accent2 = lipgloss.Color("213") // pink
 	good    = lipgloss.Color("42")  // green
 	bad     = lipgloss.Color("203") // red
-	warn    = lipgloss.Color("214") // amber
 	dim     = lipgloss.Color("244")
 	fg      = lipgloss.Color("231")
 
@@ -65,8 +64,6 @@ var (
 	borderStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(accent).Padding(0, 1)
 	footerStyle = lipgloss.NewStyle().Foreground(dim).Padding(0, 1)
 )
-
-// ---- k8s client -------------------------------------------------------------
 
 func newClient() (client.Client, string, error) {
 	cfg, err := ctrl.GetConfig()
@@ -87,32 +84,21 @@ func newClient() (client.Client, string, error) {
 	return cl, cfg.Host, nil
 }
 
-// ---- messages ---------------------------------------------------------------
-
-type tenantRow struct {
-	name      string
-	namespace string
-	nsExists  bool
-	cpu, mem  string
-	pods      int32
-	admins    int
-	policy    string
-	ready     string
-}
-
 type (
-	tenantsMsg struct{ rows []tenantRow }
-	errMsg     struct{ err error }
-	tickMsg    time.Time
+	tenantsMsg struct {
+		rows    []table.Row
+		healthy int // tenants whose namespace exists
+	}
+	errMsg  struct{ err error }
+	tickMsg time.Time
 )
-
-// ---- model ------------------------------------------------------------------
 
 type model struct {
 	cl       client.Client
 	host     string
 	table    table.Model
-	rows     []tenantRow
+	rows     []table.Row
+	healthy  int
 	err      error
 	lastSync time.Time
 	width    int
@@ -162,38 +148,37 @@ func (m model) fetchCmd() tea.Cmd {
 		if err := cl.List(ctx, &list); err != nil {
 			return errMsg{err}
 		}
-		rows := make([]tenantRow, 0, len(list.Items))
+		slices.SortFunc(list.Items, func(a, b platformv1alpha1.Tenant) int { return strings.Compare(a.Name, b.Name) })
+		msg := tenantsMsg{rows: make([]table.Row, 0, len(list.Items))}
 		for i := range list.Items {
 			t := &list.Items[i]
-			nsName := "tenant-" + t.Name
-			nsExists := true
-			if err := cl.Get(ctx, types.NamespacedName{Name: nsName}, &corev1.Namespace{}); apierrors.IsNotFound(err) {
-				nsExists = false
+			ns := t.NamespaceName()
+			nsCell := ns + "  ✓"
+			if err := cl.Get(ctx, types.NamespacedName{Name: ns}, &corev1.Namespace{}); apierrors.IsNotFound(err) {
+				nsCell = ns + "  ✗"
+			} else {
+				msg.healthy++
 			}
 			ready := "—"
-			for _, c := range t.Status.Conditions {
-				if c.Type == "Ready" {
-					ready = string(c.Status)
-				}
+			if c := meta.FindStatusCondition(t.Status.Conditions, "Ready"); c != nil {
+				ready = string(c.Status)
 			}
 			policy := t.Spec.DeletionPolicy
 			if policy == "" {
 				policy = platformv1alpha1.DeletionPolicyRetain
 			}
-			rows = append(rows, tenantRow{
-				name:      t.Name,
-				namespace: nsName,
-				nsExists:  nsExists,
-				cpu:       t.Spec.Quota.CPU.String(),
-				mem:       t.Spec.Quota.Memory.String(),
-				pods:      t.Spec.Quota.Pods,
-				admins:    len(t.Spec.Admins),
-				policy:    string(policy),
-				ready:     ready,
+			msg.rows = append(msg.rows, table.Row{
+				t.Name,
+				nsCell,
+				t.Spec.Quota.CPU.String(),
+				t.Spec.Quota.Memory.String(),
+				strconv.Itoa(int(t.Spec.Quota.Pods)),
+				strconv.Itoa(len(t.Spec.Admins)),
+				string(policy),
+				ready,
 			})
 		}
-		sort.Slice(rows, func(i, j int) bool { return rows[i].name < rows[j].name })
-		return tenantsMsg{rows}
+		return msg
 	}
 }
 
@@ -212,16 +197,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		h := m.height - 9
-		if h < 3 {
-			h = 3
-		}
-		m.table.SetHeight(h)
+		m.table.SetHeight(max(m.height-9, 3))
 	case tenantsMsg:
-		m.rows = msg.rows
-		m.err = nil
-		m.lastSync = time.Now()
-		m.table.SetRows(toTableRows(msg.rows))
+		m.rows, m.healthy, m.err, m.lastSync = msg.rows, msg.healthy, nil, time.Now()
+		m.table.SetRows(msg.rows)
 	case errMsg:
 		m.err = msg.err
 	case tickMsg:
@@ -233,34 +212,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func toTableRows(rows []tenantRow) []table.Row {
-	out := make([]table.Row, 0, len(rows))
-	for _, r := range rows {
-		nsCell := r.namespace + "  ✓"
-		if !r.nsExists {
-			nsCell = r.namespace + "  ✗"
-		}
-		out = append(out, table.Row{
-			r.name,
-			nsCell,
-			r.cpu,
-			r.mem,
-			fmt.Sprintf("%d", r.pods),
-			fmt.Sprintf("%d", r.admins),
-			r.policy,
-			r.ready,
-		})
-	}
-	return out
-}
-
 func (m model) View() string {
 	var b strings.Builder
 	b.WriteString(m.headerView())
 	b.WriteString("\n\n")
 
 	if len(m.rows) == 0 && m.err == nil {
-		b.WriteString(emptyStyle.Render("No Tenants yet.\nApply one with:  kubectl apply -f config/samples/platform_v1alpha1_tenant.yaml"))
+		b.WriteString(emptyStyle.Render("No Tenants yet.\nApply one with:  " +
+			"kubectl apply -f config/samples/platform_v1alpha1_tenant.yaml"))
 	} else {
 		b.WriteString(m.table.View())
 	}
@@ -277,17 +236,13 @@ func (m model) headerView() string {
 	if !m.lastSync.IsZero() {
 		synced = m.lastSync.Format("15:04:05")
 	}
-	meta := dimStyle.Render(fmt.Sprintf(
+	info := dimStyle.Render(fmt.Sprintf(
 		"cluster %s   tenants %d   synced %s   ↻ %ds",
 		shorten(m.host, 34), len(m.rows), synced, int(refreshEvery.Seconds()),
 	))
 
-	inner := lipgloss.JoinVertical(lipgloss.Left, title, meta)
-	w := m.width - 4
-	if w < 20 {
-		w = 20
-	}
-	return borderStyle.Width(w).Render(inner)
+	inner := lipgloss.JoinVertical(lipgloss.Left, title, info)
+	return borderStyle.Width(max(m.width-4, 20)).Render(inner)
 }
 
 func (m model) footerView() string {
@@ -295,14 +250,8 @@ func (m model) footerView() string {
 	if m.err != nil {
 		return keys + "\n" + errStyle.Render("error: "+m.err.Error())
 	}
-	healthy := 0
-	for _, r := range m.rows {
-		if r.nsExists {
-			healthy++
-		}
-	}
 	legend := footerStyle.Render(goodStyle.Render("✓ namespace present") + dimStyle.Render("   ✗ missing") +
-		dimStyle.Render(fmt.Sprintf("   %d/%d healthy", healthy, len(m.rows))))
+		dimStyle.Render(fmt.Sprintf("   %d/%d healthy", m.healthy, len(m.rows))))
 	return keys + "\n" + legend
 }
 
@@ -310,16 +259,10 @@ func shorten(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	if n <= 1 {
-		return s[:n]
-	}
 	return s[:n-1] + "…"
 }
 
 func main() {
-	// silence controller-runtime's logger warning on stderr for a clean TUI.
-	_ = warn
-
 	cl, host, err := newClient()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "k6s-tui:", err)
