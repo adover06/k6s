@@ -58,7 +58,7 @@ func (r *TenantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	if err := r.Get(ctx, req.NamespacedName, &tenant); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	nsName := "tenant-" + tenant.Name
+	nsName := tenant.NamespaceName()
 
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}}
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, ns, func() error {
@@ -98,6 +98,8 @@ func (r *TenantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 func (r *TenantReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&platformv1alpha1.Tenant{}).
+		Owns(&corev1.ResourceQuota{}).
+		Owns(&rbacv1.RoleBinding{}).
 		Named("tenant").
 		Complete(r)
 }

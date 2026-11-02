@@ -17,71 +17,48 @@ limitations under the License.
 package controller
 
 import (
-	"context"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"k8s.io/apimachinery/pkg/api/errors"
+	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	platformv1alpha1 "github.com/adover06/k6s/api/v1alpha1"
 )
 
 var _ = Describe("Tenant Controller", func() {
-	Context("When reconciling a resource", func() {
-		const (
-			resourceName      = "test-resource"
-			resourceNamespace = "default"
-		)
-
-		ctx := context.Background()
-
-		typeNamespacedName := types.NamespacedName{
-			Name:      resourceName,
-			Namespace: resourceNamespace,
+	It("provisions a namespace, quota and admin RoleBinding", func() {
+		tenant := &platformv1alpha1.Tenant{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: platformv1alpha1.TenantSpec{
+				Admins: []rbacv1.Subject{{Kind: "User", Name: "alice", APIGroup: rbacv1.GroupName}},
+				Quota: platformv1alpha1.TenantQuota{
+					CPU: resource.MustParse("2"), Memory: resource.MustParse("4Gi"), Pods: 10,
+				},
+			},
 		}
-		tenant := &platformv1alpha1.Tenant{}
+		Expect(k8sClient.Create(ctx, tenant)).To(Succeed())
+		DeferCleanup(k8sClient.Delete, ctx, tenant)
 
-		BeforeEach(func() {
-			By("creating the custom resource for the Kind Tenant")
-			err := k8sClient.Get(ctx, typeNamespacedName, tenant)
-			if err != nil && errors.IsNotFound(err) {
-				resource := &platformv1alpha1.Tenant{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      resourceName,
-						Namespace: resourceNamespace,
-					},
-					// TODO(user): Specify other spec details if needed.
-				}
-				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
-			}
-		})
+		r := &TenantReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: tenant.Name}})
+		Expect(err).NotTo(HaveOccurred())
 
-		AfterEach(func() {
-			// TODO(user): Cleanup logic after each test, like removing the resource instance.
-			resource := &platformv1alpha1.Tenant{}
-			err := k8sClient.Get(ctx, typeNamespacedName, resource)
-			Expect(err).NotTo(HaveOccurred())
+		ns := tenant.NamespaceName()
+		var namespace corev1.Namespace
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ns}, &namespace)).To(Succeed())
+		Expect(namespace.Labels).To(HaveKeyWithValue(tenantLabel, tenant.Name))
 
-			By("Cleanup the specific resource instance Tenant")
-			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
-		})
-		It("should successfully reconcile the resource", func() {
-			By("Reconciling the created resource")
-			controllerReconciler := &TenantReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
-			}
+		var quota corev1.ResourceQuota
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "tenant-quota"}, &quota)).To(Succeed())
+		Expect(quota.Spec.Hard.Pods().Value()).To(Equal(int64(10)))
 
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
-			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
-		})
+		var rb rbacv1.RoleBinding
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "tenant-admins"}, &rb)).To(Succeed())
+		Expect(rb.RoleRef.Name).To(Equal("admin"))
+		Expect(rb.Subjects).To(Equal(tenant.Spec.Admins))
 	})
 })

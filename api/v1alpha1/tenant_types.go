@@ -23,9 +23,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
 // DeletionPolicy controls what happens to a Tenant's namespace when the
 // Tenant is deleted. The quota and RoleBinding always die with the Tenant
 // through owner-reference garbage collection; only the namespace is governed
@@ -101,6 +98,9 @@ type Tenant struct {
 	// +optional
 	Status TenantStatus `json:"status,omitzero"`
 }
+
+// NamespaceName is the namespace provisioned for this Tenant.
+func (t *Tenant) NamespaceName() string { return "tenant-" + t.Name }
 
 // +kubebuilder:object:root=true
 

@@ -1,8 +1,13 @@
 # k6s
-// TODO(user): Add simple overview of use/purpose
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+A Kubernetes operator for multi-tenancy. One cluster-scoped `Tenant` gets you:
+
+- a namespace `tenant-<name>`
+- a `ResourceQuota` (CPU, memory, pods)
+- a `RoleBinding` granting the listed admins the `admin` ClusterRole
+
+See [`config/samples/platform_v1alpha1_tenant.yaml`](config/samples/platform_v1alpha1_tenant.yaml).
+Watch tenants live with `make tui`.
 
 ## Getting Started
 
@@ -111,7 +116,6 @@ previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml
 is manually re-applied afterwards.
 
 ## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
 
 **NOTE:** Run `make help` for more information on all potential `make` targets
 
